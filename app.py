@@ -217,6 +217,7 @@ def log(*a):
 def ticks_us(): return time.ticks_us()
 def ticks_ms(): return time.ticks_ms()
 def ticks_diff(a,b): return time.ticks_diff(a,b)
+def ticks_add(a,b): return time.ticks_add(a,b)
 def clamp(v, lo, hi): return lo if v < lo else hi if v > hi else v
 
 def median(vals):
@@ -483,10 +484,13 @@ class ClockDiscipline:
         if self._base_unix_us > self._last_served:
             self._last_served = self._base_unix_us
 
-    def now_unix_us(self):
+    def now_unix_us(self, now_ticks_us=None):
         if self._base_unix_us is None or self._base_ticks_us is None:
             return None
-        dt = ticks_diff(ticks_us(), self._base_ticks_us)
+        if now_ticks_us:
+            dt = ticks_diff(now_ticks_us, self._base_ticks_us)
+        else:
+            dt = ticks_diff(ticks_us(), self._base_ticks_us)
         dt_corr = (int(dt) * int(self._corr_q32)) >> 32
         est = int(self._base_unix_us) + int(dt_corr)
         if est < self._last_served:
@@ -1107,6 +1111,7 @@ class PeerMonitor:
 # ---------------- NTP server ----------------
 class NTPServer:
     def __init__(self):
+        self.pkt_build_us = 0
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setblocking(False)
         self.sock.bind(("0.0.0.0", NTP_PORT))
@@ -1246,6 +1251,12 @@ class NTPServer:
             except OSError:
                 break
 
+            # Timestamp ASAP after packet received
+            now1 = CLOCK.now_unix_us()
+            if now1 is None:
+                continue
+            t_recv = now1
+
             ip = addr[0]
             if not ip_allowed(ip):
                 continue
@@ -1267,11 +1278,6 @@ class NTPServer:
             except Exception:
                 pass
 
-            now1 = CLOCK.now_unix_us()
-            if now1 is None:
-                continue
-            t_recv = now1
-
             # Rate limit (but allow iBurst)
             if not self._rate_ok(ip):
                 if NTP_SEND_KOD_ON_LIMIT:
@@ -1288,9 +1294,16 @@ class NTPServer:
                     continue
                 # else: respond but stratum will be 16 and LI alarm via CLOCK
 
-            t_xmt = CLOCK.now_unix_us() or t_recv
+            # Compensate for delay building packet, ~2500us
+            t_xmt_us = ticks_us()
+            t_xmt = CLOCK.now_unix_us(ticks_add(t_xmt_us, self.pkt_build_us)) or t_recv
             try:
-                self.sock.sendto(self._build_reply(data, t_recv, t_xmt), addr)
+                pkt = self._build_reply(data, t_recv, t_xmt)
+                t_pkt_us = ticks_us()
+                self.sock.sendto(pkt, addr)
+
+                self.pkt_build_us =  ticks_diff(t_pkt_us, t_xmt_us)
+                #log("Build:", self.pkt_build_us)
             except Exception:
                 pass
 
