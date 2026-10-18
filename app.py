@@ -2152,6 +2152,105 @@ def init_led():
 _pps_tick = 0
 _pps_flag = False
 
+_pps_sm = None
+
+# as global to prevent GC clearing them...
+dma_timestamp = None
+dma_trigger = None
+
+import rp2
+from os import uname
+from machine import freq
+
+if 'RP2350' in uname().machine:
+    TIMERBASE = 0x400b0000      # Timer0
+    #TIMERBASE = 0x400b8000      # Timer1
+else: # rp2040
+    TIMERBASE = 0x40054000
+
+@rp2.asm_pio()
+def dma_relay():
+    wrap_target()
+
+    pull(block)                 # Pull 32-bit from TX-FIFO to ISR
+    mov(isr, osr)               # copy ISR to OSR
+    push(block)                 # Push 32-bit from OSR to RX-FIFO
+
+    wrap()
+
+@rp2.asm_pio(out_init=rp2.PIO.OUT_LOW)
+def dma_detect_gpio():
+    wrap_target()
+
+    label("wait_for_high")
+    jmp(pin, "pin_is_high")
+    wrap()
+
+    label("pin_is_high")
+    push(noblock)
+
+    label("wait_for_low")
+    jmp(pin, "wait_for_low")
+    jmp("wait_for_high")
+
+def setup_pps_pio_dma():
+    global _pps_sm
+    global dma_timestamp, dma_trigger
+
+    if not ENABLE_PPS:
+        return None
+
+    # Set up the state machines to run as fast a possible
+    _pps_sm = []
+    _pps_sm.append(rp2.StateMachine(0, dma_relay, freq=freq()))
+    _pps_sm.append(rp2.StateMachine(1, dma_detect_gpio, freq=freq(),
+                               jmp_pin=Pin(PPS_GPIO)))
+    for m in _pps_sm:
+        m.active(1)
+
+    # Allocate DMA channel(s)
+    dma_timestamp = rp2.DMA()
+    dma_trigger = rp2.DMA()
+
+    # configure for 32-bit timestamps
+    dma_timestamp_ctrl = dma_timestamp.pack_ctrl(
+        #treq_sel=0,                  # DREQ_PIO0_TX0 - As fast as possible?
+        size=2,                      # 4-byte transfers
+        inc_read=False,              # Don't Increment read address each time you send
+        inc_write=False,             # Write address stays the same (the Pio TX-FIFO)
+
+        high_pri = True,
+        chain_to = dma_trigger.channel,
+        enable=True)
+
+    dma_trigger_ctrl = dma_trigger.pack_ctrl(
+        treq_sel=5,                     # DREQ_PIO0_RX1
+        size=2,                         # 4-byte transfers
+        inc_read=False,                 # Don't Increment read address each time you send
+        inc_write=False,                # Write address stays the same (the Pio TX-FIFO)
+
+        high_pri = True,
+        chain_to = dma_timestamp.channel,
+        enable=True)
+
+    # Begin data transfer:
+    dma_timestamp.config(
+        read=TIMERBASE + 0x28,      # Address of TIMERAWL Register (u-sec counter)
+        write=_pps_sm[0],           # State machine object. This should go to the TX-FIFO.
+        count=1,
+        ctrl=dma_timestamp_ctrl,
+        trigger=False)
+
+    dma_trigger.config(
+        read=_pps_sm[1],                # what else can I use if I want FIFO intact?
+        write=_pps_sm[1],
+        count=1,
+        ctrl=dma_trigger_ctrl,
+        trigger=True)
+
+    log("PPS PIO/DMA enabled on GPIO", PPS_GPIO)
+    return
+
 def _pps_irq(pin):
     global _pps_tick, _pps_flag
     _pps_tick = ticks_us()
@@ -2191,7 +2290,8 @@ def main():
     uart = UART(GPS_UART_ID, baudrate=GPS_BAUD, tx=Pin(GPS_TX), rx=Pin(GPS_RX))
     uart.init(bits=8, parity=None, stop=1)
 
-    setup_pps()
+    #setup_pps()
+    setup_pps_pio_dma()
 
     nic, nic_mode, portal = network_init_with_portal(boot_ms)
 
@@ -2232,6 +2332,10 @@ def main():
 
         # PPS event
         global _pps_flag, _pps_tick
+        global _pps_sm
+        if _pps_sm and _pps_sm[0].rx_fifo():
+            #log("PPS FIFO:", _pps_sm[0].rx_fifo())
+            CLOCK.pps_pulse(_pps_sm[0].get() & 0x3FFFFFFF)
         if _pps_flag:
             _pps_flag = False
             CLOCK.pps_pulse(_pps_tick)
