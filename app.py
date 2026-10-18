@@ -405,6 +405,39 @@ def set_machine_rtc_from_unix(unix_us):
     except Exception:
         pass
 
+#---------------------------------------------
+# Class for performing rolling averages
+
+class Rolling:
+    def __init__(self, size=5):
+        self.max = size
+        self.data = [0.0]*size
+        self.dsum = 0.0
+
+        self.enter = 0
+        self.exit = 0
+        self.size = 0
+
+    def store(self, data):
+        if self.size == self.max:
+            self.dsum -= self.data[self.exit]
+            self.exit = (self.exit + 1) % self.max
+
+        self.data[self.enter] = data
+        self.dsum += data
+
+        self.enter = (self.enter + 1) % self.max
+        if self.size < self.max:
+            self.size += 1
+
+    def read(self):
+        if self.size > 0:
+            return(self.dsum/self.size)
+
+    def store_read(self, data):
+        self.store(data)
+        return(self.read())
+
 # ---------------- Clock discipline with PPS + holdover + gating ---------
 FLAG_GPS_LOCK     = 0x01
 FLAG_SUSPECT      = 0x02
@@ -494,7 +527,7 @@ class ClockDiscipline:
     def _holdover_ppm(self):
         if self.pps_period_avg_us is None:
             return HOLDOVER_PPM_MIN
-        ppm_meas = abs(int(self.pps_period_avg_us) - 1_000_000)
+        ppm_meas = abs(int(self.pps_period_avg_us.read()) - 1_000_000)
         return max(HOLDOVER_PPM_MIN, ppm_meas + HOLDOVER_PPM_MARGIN)
 
     def holdover_uncertainty_us(self):
@@ -551,18 +584,20 @@ class ClockDiscipline:
             period = int(ticks_diff(int(pps_tick_us), int(self.last_pps_tick_us)))
             if PPS_PERIOD_VALID_MIN_US <= period <= PPS_PERIOD_VALID_MAX_US:
                 if self.pps_period_avg_us is None:
-                    self.pps_period_avg_us = period
-                else:
-                    self.pps_period_avg_us = (int(self.pps_period_avg_us) * 7 + period) // 8
+                    self.pps_period_avg_us = Rolling(PPS_LOCK_COUNT * 30)
 
-                self._update_corr_from_period(self.pps_period_avg_us)
+                avg_us = self.pps_period_avg_us.store_read(period)
+                self._update_corr_from_period(avg_us + 0.5)
+                log("PPS:", period, "R-Avg:", avg_us)
+                #log("R-Avg:", self.pps_period_avg_us.dsum, self.pps_period_avg_us.size)
 
-                if abs(int(self.pps_period_avg_us) - 1_000_000) <= PPS_LOCK_TOL_US:
+                if abs(int(avg_us) - 1_000_000) <= PPS_LOCK_TOL_US:
                     self.pps_good += 1
                 else:
                     self.pps_good = 0
                 self.pps_locked = (self.pps_good >= PPS_LOCK_COUNT)
             else:
+                log("PPS:", period)
                 self.pps_period_avg_us = None
                 self.pps_good = 0
                 self.pps_locked = False
