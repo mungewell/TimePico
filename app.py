@@ -1164,7 +1164,7 @@ class NTPServer:
         pkt = bytearray(48)
         struct.pack_into("!BBBB", pkt, 0, first & 0xFF, stratum & 0xFF, poll & 0xFF, precision & 0xFF)
         struct.pack_into("!II", pkt, 4, root_delay & 0xFFFFFFFF, root_disp & 0xFFFFFFFF)
-        pkt[12:16] = ref_id[0:4].ljust(4, b"\x00")
+        struct.pack_into("!4s", pkt, 12, ref_id[0:4])
         struct.pack_into("!II", pkt, 16, ref_sec, ref_frac)         # Reference Timestamp
         struct.pack_into("!II", pkt, 24, org_sec, org_frac)         # Originate Timestamp (client xmit)
         struct.pack_into("!II", pkt, 32, rec_sec, rec_frac)         # Receive Timestamp
@@ -1197,7 +1197,7 @@ class NTPServer:
         pkt = bytearray(48)
         struct.pack_into("!BBBB", pkt, 0, first & 0xFF, stratum & 0xFF, poll & 0xFF, precision & 0xFF)
         struct.pack_into("!II", pkt, 4, root_delay & 0xFFFFFFFF, root_disp & 0xFFFFFFFF)
-        pkt[12:16] = code[0:4].ljust(4, b"\x00")                    # Kiss code
+        struct.pack_into("!4s", pkt, 12, code[0:4])
         struct.pack_into("!II", pkt, 16, ref_sec, ref_frac)
         struct.pack_into("!II", pkt, 24, org_sec, org_frac)
         struct.pack_into("!II", pkt, 32, rec_sec, rec_frac)
