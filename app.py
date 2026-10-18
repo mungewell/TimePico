@@ -132,7 +132,7 @@ HOLDOVER_PPM_MIN = 20
 HOLDOVER_PPM_MARGIN = 10
 
 # Config portal
-ENABLE_CONFIG_PORTAL = True
+ENABLE_CONFIG_PORTAL = False
 # Require a 4-digit PIN for portal access in STA/wired mode (recommended).
 PORTAL_PIN_REQUIRED_STA = True
 # Require a 4-digit PIN for portal access in AP fallback mode.
@@ -171,7 +171,7 @@ PORTAL_H3 = b"</span></div><div class='w'><div class='c'>"
 PORTAL_END = b"</div></div></body></html>"
 
 # Firmware update (OTA) - upload new app.py via portal (staged + safe swap on reboot)
-FW_UPDATE_ENABLE = True
+FW_UPDATE_ENABLE = False
 FW_CANDIDATE_FILE = "app_next.py"
 FW_PENDING_FILE = "update_pending.txt"
 FW_MAX_UPLOAD_BYTES = 300000   # safety cap; set 0 to disable cap
@@ -201,7 +201,6 @@ try:
 except ImportError:
     import binascii as ubinascii  # type: ignore
 
-import machine
 from machine import Pin, I2C, UART
 try:
     from machine import WDT
@@ -1311,6 +1310,8 @@ def _fs_free_bytes():
     except Exception:
         return 0
 
+'''
+# 'ENABLE_CONFIG_PORTAL = False' - code commented out to save memory
 class ConfigPortal:
     def __init__(self, boot_ms):
         self.boot_ms = boot_ms
@@ -2020,7 +2021,7 @@ class ConfigPortal:
                 conn.close()
             except Exception:
                 pass
-
+'''
 
 def _apply_hostname_to_wlan(wlan):
     # Best-effort DHCP hostname/stack hostname (varies by MicroPython build)
@@ -2043,7 +2044,11 @@ def network_init_with_portal(boot_ms):
     if network is None:
         raise RuntimeError("network module not available")
 
-    portal = ConfigPortal(boot_ms)
+    portal = None
+    try:
+        portal = ConfigPortal(boot_ms)
+    except:
+        pass
 
     if NET_MODE == "wifi":
         wlan = network.WLAN(network.STA_IF)
@@ -2071,7 +2076,8 @@ def network_init_with_portal(boot_ms):
                 except Exception as e:
                     log("Static IP set failed:", e)
             log("WiFi STA up:", wlan.ifconfig())
-            portal.start(ap_mode=False)
+            if portal:
+                portal.start(ap_mode=False)
             return wlan, "sta", portal
 
         # STA failed -> AP fallback
@@ -2109,7 +2115,8 @@ def network_init_with_portal(boot_ms):
             except Exception:
                 pass
             log("AP fallback up:", ap.ifconfig(), "SSID:", ssid)
-            portal.start(ap_mode=True)
+            if portal:
+                portal.start(ap_mode=True)
             return ap, "ap", portal
 
         raise RuntimeError("WiFi connect failed and AP fallback disabled")
@@ -2129,7 +2136,8 @@ def network_init_with_portal(boot_ms):
         if USE_STATIC_IP:
             nic.ifconfig(STATIC_IP)
         log("Wiznet up:", nic.ifconfig())
-        portal.start(ap_mode=False)
+        if portal:
+            portal.start(ap_mode=False)
         return nic, "wired", portal
 
     raise ValueError("NET_MODE must be 'wifi' or 'wiznet'")
@@ -2218,8 +2226,9 @@ def main():
             led.value(0)
 
         # Config portal (time-limited on STA/wired)
-        portal.poll(nic_mode=nic_mode, ip_info=str(getattr(nic, "ifconfig", lambda: ("", "", "", ""))()))
-        portal.stop_if_expired()
+        if portal:
+            portal.poll(nic_mode=nic_mode, ip_info=str(getattr(nic, "ifconfig", lambda: ("", "", "", ""))()))
+            portal.stop_if_expired()
 
         # PPS event
         global _pps_flag, _pps_tick
