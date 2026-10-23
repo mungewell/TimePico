@@ -1115,7 +1115,7 @@ class PeerMonitor:
 # ---------------- NTP server ----------------
 class NTPServer:
     def __init__(self):
-        self.pkt_build_us = 0
+        self.pkt_build_us = None
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setblocking(False)
         self.sock.bind(("0.0.0.0", NTP_PORT))
@@ -1307,14 +1307,22 @@ class NTPServer:
 
             # Compensate for delay building packet, ~2500us
             t_xmt_us = ticks_us()
-            t_xmt = CLOCK.now_unix_us(ticks_add(t_xmt_us, self.pkt_build_us)) or t_recv
+            if self.pkt_build_us:
+                t_xmt = CLOCK.now_unix_us(ticks_add(t_xmt_us, \
+                        int(self.pkt_build_us.read()))) or t_recv
+            else:
+                t_xmt = CLOCK.now_unix_us(t_xmt_us) or t_recv
+
             try:
                 pkt = self._build_reply(data, t_recv, t_xmt)
                 t_pkt_us = ticks_us()
                 self.sock.sendto(pkt, addr)
 
-                self.pkt_build_us =  ticks_diff(t_pkt_us, t_xmt_us)
-                #log("Build:", self.pkt_build_us)
+                if not self.pkt_build_us:
+                    self.pkt_build_us = Rolling()
+                self.pkt_build_us.store(ticks_diff(t_pkt_us, t_xmt_us))
+
+                log("Build:", self.pkt_build_us.read())
             except Exception:
                 pass
 
