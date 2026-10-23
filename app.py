@@ -620,6 +620,9 @@ class ClockDiscipline:
         self.gps_lock = bool(self.gps_valid and self.gps_fix_type == 3)
         self.last_gps_ms = nowms
 
+        if not valid:
+            return
+
         gps_unix_s = int((int(unix_us) + 500_000) // 1_000_000)
 
         aligned = False
