@@ -63,6 +63,7 @@ PPS_PULLDOWN = True
 
 # Network interface
 NET_MODE = "wifi"                # "wifi" (Pico W/2W) or "wiznet" (W5x00)
+WIFI_CS_MON = True
 
 # WiFi defaults (override via portal)
 WIFI_SSID = "YOUR_SSID"
@@ -1248,6 +1249,8 @@ class NTPServer:
         return bytes(pkt)
 
     def serve_once(self):
+        global _wifi_flag
+
         while True:
             try:
                 data, addr = self.sock.recvfrom(256)
@@ -1255,7 +1258,12 @@ class NTPServer:
                 break
 
             # Timestamp ASAP after packet received
-            now1 = CLOCK.now_unix_us()
+            if _wifi_flag:
+                #log("WIFI:", _wifi_tick, ticks_diff(ticks_us(), _wifi_tick))
+                now1 = CLOCK.now_unix_us(_wifi_tick)
+                _wifi_flag = False
+            else:
+                now1 = CLOCK.now_unix_us()
             if now1 is None:
                 continue
             t_recv = now1
@@ -2193,10 +2201,26 @@ def network_init_with_portal(boot_ms):
 
     raise ValueError("NET_MODE must be 'wifi' or 'wiznet'")
 
+_wifi_tick = 0
+_wifi_flag = False
+
+def _wifi_irq(pin):
+    global _wifi_tick, _wifi_flag
+    _wifi_tick = ticks_us()
+    _wifi_flag = True
+
 def init_led():
+    if WIFI_CS_MON:
+        pull = Pin.PULL_DOWN if PPS_PULLDOWN else None
+        p = Pin(25, Pin.IN)
+        #p.irq(trigger=Pin.IRQ_RISING, handler=_wifi_irq)
+        p.irq(trigger=Pin.IRQ_FALLING, handler=_wifi_irq)
+
     try:
         return Pin("LED", Pin.OUT)
     except Exception:
+        if WIFI_CS_MON:
+            return Pin(26, Pin.OUT)
         return Pin(25, Pin.OUT)
 
 # ---------------- PPS IRQ plumbing ----------------
