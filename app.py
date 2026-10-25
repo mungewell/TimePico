@@ -63,7 +63,6 @@ PPS_PULLDOWN = True
 
 # Network interface
 NET_MODE = "wifi"                # "wifi" (Pico W/2W) or "wiznet" (W5x00)
-WIFI_CS_MON = True
 
 # WiFi defaults (override via portal)
 WIFI_SSID = "YOUR_SSID"
@@ -593,7 +592,7 @@ class ClockDiscipline:
 
                 avg_us = self.pps_period_avg_us.store_read(period)
                 self._update_corr_from_period(avg_us + 0.5)
-                log("PPS:", period, "R-Avg:", avg_us)
+                #log("PPS:", period, "R-Avg:", avg_us)
                 #log("R-Avg:", self.pps_period_avg_us.dsum, self.pps_period_avg_us.size)
 
                 if abs(int(avg_us) - 1_000_000) <= PPS_LOCK_TOL_US:
@@ -1249,7 +1248,7 @@ class NTPServer:
         return bytes(pkt)
 
     def serve_once(self):
-        global _wifi_flag
+        global _wl_irq_flag
 
         while True:
             try:
@@ -1258,10 +1257,9 @@ class NTPServer:
                 break
 
             # Timestamp ASAP after packet received
-            if _wifi_flag:
-                #log("WIFI:", _wifi_tick, ticks_diff(ticks_us(), _wifi_tick))
-                now1 = CLOCK.now_unix_us(_wifi_tick)
-                _wifi_flag = False
+            if _wl_irq_flag:
+                now1 = CLOCK.now_unix_us(int.from_bytes(_wl_irq_tick , 'little') & 0x3FFFFFFF)
+                _wl_irq_flag = False
             else:
                 now1 = CLOCK.now_unix_us()
             if now1 is None:
@@ -2209,26 +2207,10 @@ def network_init_with_portal(boot_ms):
 
     raise ValueError("NET_MODE must be 'wifi' or 'wiznet'")
 
-_wifi_tick = 0
-_wifi_flag = False
-
-def _wifi_irq(pin):
-    global _wifi_tick, _wifi_flag
-    _wifi_tick = ticks_us()
-    _wifi_flag = True
-
 def init_led():
-    if WIFI_CS_MON:
-        pull = Pin.PULL_DOWN if PPS_PULLDOWN else None
-        p = Pin(25, Pin.IN)
-        #p.irq(trigger=Pin.IRQ_RISING, handler=_wifi_irq)
-        p.irq(trigger=Pin.IRQ_FALLING, handler=_wifi_irq)
-
     try:
         return Pin("LED", Pin.OUT)
     except Exception:
-        if WIFI_CS_MON:
-            return Pin(26, Pin.OUT)
         return Pin(25, Pin.OUT)
 
 # ---------------- PPS IRQ plumbing ----------------
@@ -2237,9 +2219,15 @@ _pps_flag = False
 
 _pps_sm = None
 
+_wl_irq_tick = bytearray(4)
+_wl_irq_flag = False
+
 # as global to prevent GC clearing them...
 dma_timestamp = None
 dma_trigger = None
+
+dma_wl_timestamp = None
+dma_wl_trigger = None
 
 import rp2
 from os import uname
@@ -2276,9 +2264,40 @@ def dma_detect_gpio():
     jmp(pin, "wait_for_low")
     jmp("wait_for_high")
 
+@rp2.asm_pio(sideset_init=[rp2.PIO.OUT_LOW])
+def both_pins_high():
+    label("check_pins")
+    mov(isr, invert(null)) .side(0) # clear output before checking pins
+    in_(pins, 2)
+    mov(x, invert(isr))
+
+    jmp(x_dec, "check_pins")
+
+    push(noblock) .side(1)          # notify that WIFI_IRQ has occurred
+
+    set(x, 63)                      # lengthen to ~250us to prevent retriggers
+    label("lengthen_x")
+    nop()[7]
+    nop()[7]
+    jmp(x_dec, "lengthen_x")[7]
+
+    wrap_target()
+    mov(isr, invert(null))          # load 'all ones'
+    in_(pins, 2)                    # shift in 2 bits from pins
+    mov(x, invert(isr))             # copy and invert
+
+    jmp(x_dec, "check_pins")        # jump if x!=0
+    wrap()
+
+def _wl_irq(pin):
+    global _wl_irq_tick, _wl_irq_flag
+    #_wl_irq_tick = ticks_us()
+    _wl_irq_flag = True
+
 def setup_pps_pio_dma():
     global _pps_sm
     global dma_timestamp, dma_trigger
+    global dma_wl_timestamp, dma_wl_trigger
 
     if not ENABLE_PPS:
         return None
@@ -2288,6 +2307,15 @@ def setup_pps_pio_dma():
     _pps_sm.append(rp2.StateMachine(0, dma_relay, freq=freq()))
     _pps_sm.append(rp2.StateMachine(1, dma_detect_gpio, freq=freq(),
                                jmp_pin=Pin(PPS_GPIO)))
+
+    # PIO to recreate psuedo_WL_IRQ
+    if NET_MODE == "wifi":
+        p = Pin(26, Pin.IN)
+        p.irq(trigger=Pin.IRQ_RISING, handler=_wl_irq)
+        _pps_sm.append(rp2.StateMachine(2, both_pins_high, freq=int(freq()/40),
+                               in_base=Pin(24),
+                               sideset_base=Pin(26)))
+
     for m in _pps_sm:
         m.active(1)
 
@@ -2330,6 +2358,48 @@ def setup_pps_pio_dma():
         count=1,
         ctrl=dma_trigger_ctrl,
         trigger=True)
+
+    if NET_MODE == "wifi":
+        dma_wl_timestamp = rp2.DMA()
+        dma_wl_trigger = rp2.DMA()
+
+        # configure for 32-bit timestamps
+        dma_wl_timestamp_ctrl = dma_wl_timestamp.pack_ctrl(
+            #treq_sel=0,                  # DREQ_PIO0_TX0 - As fast as possible?
+            size=2,                      # 4-byte transfers
+            inc_read=False,              # Don't Increment read address each time you send
+            inc_write=False,             # Write address stays the same (the Pio TX-FIFO)
+
+            high_pri = True,
+            chain_to = dma_wl_trigger.channel,
+            enable=True)
+
+        dma_wl_trigger_ctrl = dma_wl_trigger.pack_ctrl(
+            treq_sel=6,                     # DREQ_PIO0_RX2
+            size=2,                         # 4-byte transfers
+            inc_read=False,                 # Don't Increment read address each time you send
+            inc_write=False,                # Write address stays the same (the Pio TX-FIFO)
+
+            high_pri = True,
+            chain_to = dma_wl_timestamp.channel,
+            enable=True)
+
+        # Begin data transfer:
+        dma_wl_timestamp.config(
+            read=TIMERBASE + 0x28,          # Address of TIMERAWL Register (u-sec counter)
+            write=_wl_irq_tick,
+            count=1,
+            ctrl=dma_wl_timestamp_ctrl,
+            trigger=False)
+
+        dma_wl_trigger.config(
+            read=_pps_sm[2],                # what else can I use if I want FIFO intact?
+            write=_pps_sm[2],
+            count=1,
+            ctrl=dma_wl_trigger_ctrl,
+            trigger=True)
+
+        log("psuedo WL_IRQ monitor enabled on GPIO26")
 
     log("PPS PIO/DMA enabled on GPIO", PPS_GPIO)
     return
