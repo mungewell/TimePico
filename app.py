@@ -1313,14 +1313,18 @@ class NTPServer:
 
             try:
                 pkt = self._build_reply(data, t_recv, t_xmt)
-                t_pkt_us = ticks_us()
                 self.sock.sendto(pkt, addr)
+                t_pkt_us = ticks_us()
 
+                delay = ticks_diff(t_pkt_us, t_xmt_us)
                 if not self.pkt_build_us:
                     self.pkt_build_us = Rolling()
-                self.pkt_build_us.store(ticks_diff(t_pkt_us, t_xmt_us))
+                    self.pkt_build_us.store(delay)
+                elif delay < (self.pkt_build_us.read() * 1.5):
+                    # don't store 'unusual' delays, likely GC issue
+                    self.pkt_build_us.store(ticks_diff(t_pkt_us, t_xmt_us))
 
-                log("Build:", self.pkt_build_us.read())
+                #log("Build:", self.pkt_build_us.read())
             except Exception:
                 pass
 
