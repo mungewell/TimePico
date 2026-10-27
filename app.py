@@ -493,10 +493,11 @@ class ClockDiscipline:
             dt = ticks_diff(ticks_us(), self._base_ticks_us)
         dt_corr = (int(dt) * int(self._corr_q32)) >> 32
         est = int(self._base_unix_us) + int(dt_corr)
-        if est < self._last_served:
-            est = self._last_served
-        else:
-            self._last_served = est
+        if not now_ticks_us:
+            if est < self._last_served:
+                est = self._last_served
+            else:
+                self._last_served = est
         return est
 
     def flags(self):
