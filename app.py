@@ -584,6 +584,7 @@ class ClockDiscipline:
     def pps_pulse(self, pps_tick_us):
         nowms = ticks_ms()
         self.last_pps_ms = nowms
+        #log("PPS:", pps_tick_us)
 
         if self.last_pps_tick_us is not None:
             period = int(ticks_diff(int(pps_tick_us), int(self.last_pps_tick_us)))
@@ -602,7 +603,7 @@ class ClockDiscipline:
                     self.pps_good = 0
                 self.pps_locked = (self.pps_good >= PPS_LOCK_COUNT)
             else:
-                log("PPS:", period)
+                #log("PPS:", period)
                 self.pps_period_avg_us = None
                 self.pps_good = 0
                 self.pps_locked = False
@@ -1115,6 +1116,7 @@ class PeerMonitor:
 # ---------------- NTP server ----------------
 class NTPServer:
     def __init__(self):
+        self.pkt = bytearray(48)
         self.pkt_build_us = None
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setblocking(False)
@@ -1205,15 +1207,14 @@ class NTPServer:
         rec_sec, rec_frac = ntp_from_unix_us(t_recv_us)
         xmt_sec, xmt_frac = ntp_from_unix_us(t_xmt_us)
 
-        pkt = bytearray(48)
-        struct.pack_into("!BBBB", pkt, 0, first & 0xFF, stratum & 0xFF, poll & 0xFF, precision & 0xFF)
-        struct.pack_into("!II", pkt, 4, root_delay & 0xFFFFFFFF, root_disp & 0xFFFFFFFF)
-        struct.pack_into("!4s", pkt, 12, ref_id[0:4])
-        struct.pack_into("!II", pkt, 16, ref_sec, ref_frac)         # Reference Timestamp
-        struct.pack_into("!II", pkt, 24, org_sec, org_frac)         # Originate Timestamp (client xmit)
-        struct.pack_into("!II", pkt, 32, rec_sec, rec_frac)         # Receive Timestamp
-        struct.pack_into("!II", pkt, 40, xmt_sec, xmt_frac)         # Transmit Timestamp
-        return bytes(pkt)
+        struct.pack_into("!BBBB", self.pkt, 0, first & 0xFF, stratum & 0xFF, poll & 0xFF, precision & 0xFF)
+        struct.pack_into("!II", self.pkt, 4, root_delay & 0xFFFFFFFF, root_disp & 0xFFFFFFFF)
+        struct.pack_into("!4s", self.pkt, 12, ref_id[0:4])
+        struct.pack_into("!II", self.pkt, 16, ref_sec, ref_frac)    # Reference Timestamp
+        struct.pack_into("!II", self.pkt, 24, org_sec, org_frac)    # Originate Timestamp (client xmit)
+        struct.pack_into("!II", self.pkt, 32, rec_sec, rec_frac)    # Receive Timestamp
+        struct.pack_into("!II", self.pkt, 40, xmt_sec, xmt_frac)    # Transmit Timestamp
+        return
 
     def _build_kod(self, req, t_recv_us, t_xmt_us, code=b"RATE"):
         # Kiss-o'-Death packet: stratum 0, refid = 4-char code (e.g., RATE, DENY)
@@ -1238,26 +1239,42 @@ class NTPServer:
         rec_sec, rec_frac = ntp_from_unix_us(t_recv_us)
         xmt_sec, xmt_frac = ntp_from_unix_us(t_xmt_us)
 
-        pkt = bytearray(48)
-        struct.pack_into("!BBBB", pkt, 0, first & 0xFF, stratum & 0xFF, poll & 0xFF, precision & 0xFF)
-        struct.pack_into("!II", pkt, 4, root_delay & 0xFFFFFFFF, root_disp & 0xFFFFFFFF)
-        struct.pack_into("!4s", pkt, 12, code[0:4])
-        struct.pack_into("!II", pkt, 16, ref_sec, ref_frac)
-        struct.pack_into("!II", pkt, 24, org_sec, org_frac)
-        struct.pack_into("!II", pkt, 32, rec_sec, rec_frac)
-        struct.pack_into("!II", pkt, 40, xmt_sec, xmt_frac)
-        return bytes(pkt)
+        struct.pack_into("!BBBB", self.pkt, 0, first & 0xFF, stratum & 0xFF, poll & 0xFF, precision & 0xFF)
+        struct.pack_into("!II", self.pkt, 4, root_delay & 0xFFFFFFFF, root_disp & 0xFFFFFFFF)
+        struct.pack_into("!4s", self.pkt, 12, code[0:4])
+        struct.pack_into("!II", self.pkt, 16, ref_sec, ref_frac)
+        struct.pack_into("!II", self.pkt, 24, org_sec, org_frac)
+        struct.pack_into("!II", self.pkt, 32, rec_sec, rec_frac)
+        struct.pack_into("!II", self.pkt, 40, xmt_sec, xmt_frac)
+        return
 
     def serve_once(self):
         global _wl_irq_flag
 
-        while True:
+        count = 5
+        pkt_build_us = 2500
+        while count > 0:
+            if self.pkt_build_us:
+                pkt_build_us = int(self.pkt_build_us.read())
+
             try:
+                self.sock.setblocking(False)
                 data, addr = self.sock.recvfrom(256)
+                count -= 1
             except OSError:
-                break
+                if ENABLE_PPS == True:
+                    self.sock.setblocking(True)
+                    self.sock.settimeout(0.1)
+                    try:
+                        data, addr = self.sock.recvfrom(256)
+                        count -= 1
+                    except OSError:
+                        break
+                else:
+                    break
 
             # Timestamp ASAP after packet received
+            # --- START of time critical ---
             if _wl_irq_flag:
                 now1 = CLOCK.now_unix_us(int.from_bytes(_wl_irq_tick , 'little') & 0x3FFFFFFF)
                 _wl_irq_flag = False
@@ -1281,19 +1298,15 @@ class NTPServer:
             if mode != 3:
                 continue
 
-
-            # Debug: flash DP3 on any valid NTP client request
-            try:
-                ntp_debug_flash_trigger()
-            except Exception:
-                pass
-
             # Rate limit (but allow iBurst)
             if not self._rate_ok(ip):
                 if NTP_SEND_KOD_ON_LIMIT:
+                    t_xmt_us = ticks_us()
+                    t_xmt = CLOCK.now_unix_us(ticks_add(t_xmt_us, pkt_build_us)) or t_recv
                     try:
-                        t_xmt = CLOCK.now_unix_us() or t_recv
-                        self.sock.sendto(self._build_kod(data, t_recv, t_xmt, b"RATE"), addr)
+                        self._build_kod(data, t_recv, t_xmt, b"RATE")
+                        self.sock.sendto(self.pkt, addr)
+                        # --- END of time critical ---
                     except Exception:
                         pass
                 continue
@@ -1306,16 +1319,13 @@ class NTPServer:
 
             # Compensate for delay building packet, ~2500us
             t_xmt_us = ticks_us()
-            if self.pkt_build_us:
-                t_xmt = CLOCK.now_unix_us(ticks_add(t_xmt_us, \
-                        int(self.pkt_build_us.read()))) or t_recv
-            else:
-                t_xmt = CLOCK.now_unix_us(t_xmt_us) or t_recv
+            t_xmt = CLOCK.now_unix_us(ticks_add(t_xmt_us, pkt_build_us)) or t_recv
 
             try:
-                pkt = self._build_reply(data, t_recv, t_xmt)
-                self.sock.sendto(pkt, addr)
+                self._build_reply(data, t_recv, t_xmt)
                 t_pkt_us = ticks_us()
+                self.sock.sendto(self.pkt, addr)
+                # --- END of time critical ---
 
                 delay = ticks_diff(t_pkt_us, t_xmt_us)
                 if not self.pkt_build_us:
@@ -1325,7 +1335,12 @@ class NTPServer:
                     # don't store 'unusual' delays, likely GC issue
                     self.pkt_build_us.store(ticks_diff(t_pkt_us, t_xmt_us))
 
-                #log("Build:", self.pkt_build_us.read())
+            except Exception:
+                pass
+
+            # Debug: flash DP3 on any valid NTP client request
+            try:
+                ntp_debug_flash_trigger()
             except Exception:
                 pass
 
@@ -2625,7 +2640,8 @@ def main():
         if (now % 5000) < 20:
             gc.collect()
 
-        time.sleep_ms(5)
+        if ENABLE_PPS == False:
+            time.sleep_ms(5)
 
 if __name__ == "__main__":
     main()
