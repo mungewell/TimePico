@@ -2138,6 +2138,12 @@ def network_init_with_portal(boot_ms):
     if NET_MODE == "wifi":
         wlan = network.WLAN(network.STA_IF)
         wlan.active(True)
+
+        # disable powersave
+        if ENABLE_PPS == True:
+            wlan.config(pm=0xA11140)
+            log("WLAN PM disabled:", hex(wlan.config('pm')))
+
         _apply_hostname_to_wlan(wlan)
         ok = False
         if WIFI_SSID and WIFI_SSID != "YOUR_SSID":
