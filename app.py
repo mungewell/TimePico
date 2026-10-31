@@ -491,7 +491,7 @@ class ClockDiscipline:
             dt = ticks_diff(now_ticks_us, self._base_ticks_us)
         else:
             dt = ticks_diff(ticks_us(), self._base_ticks_us)
-        dt_corr = (int(dt) * int(self._corr_q32)) >> 32
+        dt_corr = (int(dt * (1<<10)) * int(self._corr_q32)) >> 42
         est = int(self._base_unix_us) + int(dt_corr)
         if not now_ticks_us:
             if est < self._last_served:
@@ -527,7 +527,7 @@ class ClockDiscipline:
 
     def _update_corr_from_period(self, period_us):
         if period_us <= 0: return
-        self._corr_q32 = (1_000_000 << 32) // int(period_us)
+        self._corr_q32 = (1_000_000 << 42) // int(period_us * (1<<10))
 
     def _holdover_ppm(self):
         if self.pps_period_avg_us is None:
