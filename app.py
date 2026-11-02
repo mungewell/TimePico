@@ -409,11 +409,14 @@ def set_machine_rtc_from_unix(unix_us):
 #---------------------------------------------
 # Class for performing rolling averages
 
-class Rolling:
-    def __init__(self, size=5):
-        self.max = size
-        self.data = [0.0]*size
-        self.dsum = 0.0
+class Rolling_Integer:
+    def __init__(self, size_pow2=3, shift_out=0):
+        self.size_pow2 = size_pow2
+        self.shift_out = shift_out - size_pow2
+        self.max = 1 << size_pow2
+
+        self.data = [0] * self.max
+        self.dsum = 0
 
         self.enter = 0
         self.exit = 0
@@ -432,8 +435,15 @@ class Rolling:
             self.size += 1
 
     def read(self):
+        out = self.dsum
         if self.size > 0:
-            return(self.dsum/self.size)
+            if self.size < self.max:
+                out = (self.dsum << self.size_pow2) // self.size
+
+            if self.shift_out >= 0:
+                return(out << self.shift_out)
+            else:
+                return(out >> abs(self.shift_out))
 
     def store_read(self, data):
         self.store(data)
@@ -445,6 +455,8 @@ FLAG_SUSPECT      = 0x02
 FLAG_STABILIZED   = 0x04
 FLAG_STABLE_NOW   = 0x08
 FLAG_PPS_LOCK     = 0x10
+
+PERIOD_FRACTIONAL_BITS = 10
 
 class ClockDiscipline:
     def __init__(self):
@@ -527,12 +539,12 @@ class ClockDiscipline:
 
     def _update_corr_from_period(self, period_us):
         if period_us <= 0: return
-        self._corr_q32 = (1_000_000 << 42) // int(period_us * (1<<10))
+        self._corr_q32 = (1_000_000 << (32 + PERIOD_FRACTIONAL_BITS)) // int(period_us)
 
     def _holdover_ppm(self):
         if self.pps_period_avg_us is None:
             return HOLDOVER_PPM_MIN
-        ppm_meas = abs(int(self.pps_period_avg_us.read()) - 1_000_000)
+        ppm_meas = abs(int(self.pps_period_avg_us.read() >> PERIOD_FRACTIONAL_BITS) - 1_000_000)
         return max(HOLDOVER_PPM_MIN, ppm_meas + HOLDOVER_PPM_MARGIN)
 
     def holdover_uncertainty_us(self):
@@ -585,19 +597,20 @@ class ClockDiscipline:
         nowms = ticks_ms()
         self.last_pps_ms = nowms
         #log("PPS:", pps_tick_us)
+        #log("UNIX:", CLOCK.now_unix_us(pps_tick_us))
 
         if self.last_pps_tick_us is not None:
             period = int(ticks_diff(int(pps_tick_us), int(self.last_pps_tick_us)))
             if PPS_PERIOD_VALID_MIN_US <= period <= PPS_PERIOD_VALID_MAX_US:
                 if self.pps_period_avg_us is None:
-                    self.pps_period_avg_us = Rolling(PPS_LOCK_COUNT * 30)
+                    # 2^5 = 32 samples, output shifted up by 10 fractional bits
+                    self.pps_period_avg_us = Rolling_Integer(5, PERIOD_FRACTIONAL_BITS)
 
                 avg_us = self.pps_period_avg_us.store_read(period)
-                self._update_corr_from_period(avg_us + 0.5)
-                #log("PPS:", period, "R-Avg:", avg_us)
-                #log("R-Avg:", self.pps_period_avg_us.dsum, self.pps_period_avg_us.size)
+                self._update_corr_from_period(avg_us + (1<<(PERIOD_FRACTIONAL_BITS-1)))
+                #log("PPS:", period, "R-Avg:~", float(avg_us) / (1<<PERIOD_FRACTIONAL_BITS))
 
-                if abs(int(avg_us) - 1_000_000) <= PPS_LOCK_TOL_US:
+                if abs(int(avg_us >> PERIOD_FRACTIONAL_BITS) - 1_000_000) <= PPS_LOCK_TOL_US:
                     self.pps_good += 1
                 else:
                     self.pps_good = 0
@@ -1323,13 +1336,15 @@ class NTPServer:
 
             try:
                 self._build_reply(data, t_recv, t_xmt)
-                t_pkt_us = ticks_us()
                 self.sock.sendto(self.pkt, addr)
+                t_pkt_us = ticks_us()
                 # --- END of time critical ---
+                time.sleep_ms(1)
 
                 delay = ticks_diff(t_pkt_us, t_xmt_us)
+                #log("Delay:", delay)
                 if not self.pkt_build_us:
-                    self.pkt_build_us = Rolling()
+                    self.pkt_build_us = Rolling_Integer()
                     self.pkt_build_us.store(delay)
                 elif delay < (self.pkt_build_us.read() * 1.5):
                     # don't store 'unusual' delays, likely GC issue
