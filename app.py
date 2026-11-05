@@ -178,7 +178,7 @@ FW_MAX_UPLOAD_BYTES = 300000   # safety cap; set 0 to disable cap
 
 
 # Watchdog
-ENABLE_WDT = True
+ENABLE_WDT = False
 WDT_TIMEOUT_MS = 8000
 
 DEBUG = True
@@ -1302,11 +1302,23 @@ class NTPServer:
 
             # Timestamp ASAP after packet received
             # --- START of time critical ---
+            now = ticks_us()
+            '''
+            log("Wifi:", now, (int.from_bytes(_wl_irq_tick , 'little') & 0x3FFFFFFF))
+            for i in range(len(wl_irq_data)):
+                log("Wifi:", wl_irq_index, 0-i, wl_irq_data[(wl_irq_index - i) & 0b111])
+
             if _wl_irq_flag:
                 now1 = CLOCK.now_unix_us(int.from_bytes(_wl_irq_tick , 'little') & 0x3FFFFFFF)
                 _wl_irq_flag = False
+            '''
+            index = wl_irq_index
+            if wl_irq_data[index & 0b111][1]:
+                # just use most recent timestamp - simplest code...
+                now1 = CLOCK.now_unix_us(wl_irq_data[index & 0b111][0])
+                wl_irq_data[index & 0b111][1] = False
             else:
-                now1 = CLOCK.now_unix_us()
+                now1 = CLOCK.now_unix_us(now)
             if now1 is None:
                 continue
             t_recv = now1
@@ -2282,6 +2294,11 @@ _pps_sm = None
 _wl_irq_tick = bytearray(4)
 _wl_irq_flag = False
 
+# store the last 8 'sWL-IRQ' timestamps
+wl_irq_data = [[0, False],[0, False],[0, False],[0, False],
+               [0, False],[0, False],[0, False],[0, False]]
+wl_irq_index = 0
+
 # as global to prevent GC clearing them...
 dma_timestamp = None
 dma_trigger = None
@@ -2350,9 +2367,15 @@ def both_pins_high():
     wrap()
 
 def _wl_irq(pin):
-    global _wl_irq_tick, _wl_irq_flag
-    #_wl_irq_tick = ticks_us()
-    _wl_irq_flag = True
+    '''
+    global _wl_irq_tick
+    _wl_irq_tick = True
+    '''
+    global wl_irq_data, wl_irq_index
+    while _pps_sm[3].rx_fifo():
+        wl_irq_index += 1
+        wl_irq_data[wl_irq_index & 0b111][0] = _pps_sm[3].get() & 0x3FFFFFFF
+        wl_irq_data[wl_irq_index & 0b111][1] = True
 
 def setup_pps_pio_dma():
     global _pps_sm
@@ -2375,6 +2398,7 @@ def setup_pps_pio_dma():
         _pps_sm.append(rp2.StateMachine(2, both_pins_high, freq=int(freq()/40),
                                in_base=Pin(24),
                                sideset_base=Pin(26)))
+        _pps_sm.append(rp2.StateMachine(3, dma_relay, freq=freq()))
 
     for m in _pps_sm:
         m.active(1)
@@ -2447,7 +2471,8 @@ def setup_pps_pio_dma():
         # Begin data transfer:
         dma_wl_timestamp.config(
             read=TIMERBASE + 0x28,          # Address of TIMERAWL Register (u-sec counter)
-            write=_wl_irq_tick,
+            #write=_wl_irq_tick,
+            write=_pps_sm[3],               # State machine object. This should go to the TX-FIFO.
             count=1,
             ctrl=dma_wl_timestamp_ctrl,
             trigger=False)
@@ -2530,6 +2555,7 @@ def main():
         except Exception:
             pass
 
+        '''
         # LED status: suspect fast blink, stable serve slow blink
         if CLOCK.suspect:
             led.value(1 if (now // 150) % 2 else 0)
@@ -2537,6 +2563,7 @@ def main():
             led.value(1 if (now // 500) % 2 else 0)
         else:
             led.value(0)
+        '''
 
         # Config portal (time-limited on STA/wired)
         portal.poll(nic_mode=nic_mode, ip_info=str(getattr(nic, "ifconfig", lambda: ("", "", "", ""))()))
