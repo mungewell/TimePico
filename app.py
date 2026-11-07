@@ -1285,7 +1285,8 @@ class NTPServer:
             try:
                 self.sock.setblocking(False)
                 #pre = ticks_us()
-                data, addr = self.sock.recvfrom(256)
+                #data, addr = self.sock.recvfrom(256)
+                data, addr, tstamp_pkt = self.sock.recvfrom_ts(256)
                 count -= 1
             except OSError:
                 if ENABLE_PPS == True:
@@ -1293,7 +1294,8 @@ class NTPServer:
                     self.sock.settimeout(0.1)
                     try:
                         #pre = ticks_us()
-                        data, addr = self.sock.recvfrom(256)
+                        #data, addr = self.sock.recvfrom(256)
+                        data, addr, tstamp_pkt = self.sock.recvfrom_ts(256)
                         count -= 1
                     except OSError:
                         break
@@ -1304,8 +1306,8 @@ class NTPServer:
             # --- START of time critical ---
             now = ticks_us()
             '''
-            log("Wifi:", now, (int.from_bytes(_wl_irq_tick , 'little') & 0x3FFFFFFF))
-            for i in range(len(wl_irq_data)):
+            log("Timestamp:", tstamp_pkt)
+            for i in range(8):
                 log("Wifi:", wl_irq_index, 0-i, wl_irq_data[(wl_irq_index - i) & 0b111])
 
             if _wl_irq_flag:
@@ -1313,12 +1315,28 @@ class NTPServer:
                 _wl_irq_flag = False
             '''
             index = wl_irq_index
-            if wl_irq_data[index & 0b111][1]:
-                # just use most recent timestamp - simplest code...
-                now1 = CLOCK.now_unix_us(wl_irq_data[index & 0b111][0])
-                wl_irq_data[index & 0b111][1] = False
+            tstamp_irq = None
+            for i in range(8):
+                if wl_irq_data[(index - i) & 0b111][1]:
+                    tstamp = wl_irq_data[(index - i) & 0b111][0]
+                    if ticks_diff(now, tstamp) > 50_000:
+                        # IRQ is too old, expire it
+                        wl_irq_data[(index - i) & 0b111][1] = False
+                        continue
+                    if ticks_diff(tstamp_pkt & 0x3FFFFFFF, tstamp) < 0:
+                        # packet is from earlier IRQ, skip
+                        log("Skipped")
+                        continue
+                    if ticks_diff(tstamp_pkt & 0x3FFFFFFF, tstamp) < 10_000:
+                        # packet is within 10ms of IRQ
+                        tstamp_irq = tstamp
+                        wl_irq_data[(index - i) & 0b111][1] = False
+            if tstamp_irq:
+                now1 = CLOCK.now_unix_us(tstamp_irq)
             else:
-                now1 = CLOCK.now_unix_us(now)
+                # fall-back if we have no other value
+                log("No Match", tstamp_pkt)
+                continue
             if now1 is None:
                 continue
             t_recv = now1
@@ -1384,6 +1402,8 @@ class NTPServer:
             except Exception:
                 pass
 
+            log("Matched", tstamp_irq, ticks_diff(tstamp_pkt & 0x3FFFFFFF, tstamp_irq), \
+                    ticks_diff(now, tstamp_irq))
             '''
             pre_unix_us = CLOCK.now_unix_us(pre)
             if now1 - pre_unix_us < 0:
@@ -2555,7 +2575,6 @@ def main():
         except Exception:
             pass
 
-        '''
         # LED status: suspect fast blink, stable serve slow blink
         if CLOCK.suspect:
             led.value(1 if (now // 150) % 2 else 0)
@@ -2563,7 +2582,6 @@ def main():
             led.value(1 if (now // 500) % 2 else 0)
         else:
             led.value(0)
-        '''
 
         # Config portal (time-limited on STA/wired)
         portal.poll(nic_mode=nic_mode, ip_info=str(getattr(nic, "ifconfig", lambda: ("", "", "", ""))()))
