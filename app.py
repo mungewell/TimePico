@@ -608,7 +608,7 @@ class ClockDiscipline:
                     self.pps_period_avg_us = Rolling_Integer(5, PERIOD_FRACTIONAL_BITS)
 
                 avg_us = self.pps_period_avg_us.store_read(period)
-                self._update_corr_from_period(avg_us + (1<<(PERIOD_FRACTIONAL_BITS-1)))
+                self._update_corr_from_period(avg_us)
                 #log("PPS:", period, "R-Avg:~", float(avg_us) / (1<<PERIOD_FRACTIONAL_BITS))
 
                 if abs(int(avg_us >> PERIOD_FRACTIONAL_BITS) - 1_000_000) <= PPS_LOCK_TOL_US:
@@ -636,7 +636,7 @@ class ClockDiscipline:
         self.gps_lock = bool(self.gps_valid and self.gps_fix_type == 3)
         self.last_gps_ms = nowms
 
-        if not valid:
+        if not valid and self.last_pps_tick_us_fr is None:
             return
 
         gps_unix_s = int((int(unix_us) + 500_000) // 1_000_000)
