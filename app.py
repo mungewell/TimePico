@@ -58,11 +58,11 @@ GPS_RX = 1                       # Pico GPIO1 <- GPS TX
 
 # PPS input
 ENABLE_PPS = True
-PPS_GPIO = 16                    # Pico GPIO16 (physical pin 21)
+PPS_GPIO = 15                    # Pico GPIO16 (physical pin 21)
 PPS_PULLDOWN = True
 
 # Network interface
-NET_MODE = "wifi"                # "wifi" (Pico W/2W) or "wiznet" (W5x00)
+NET_MODE = "wiznet"                # "wifi" (Pico W/2W) or "wiznet" (W5x00)
 
 # WiFi defaults (override via portal)
 WIFI_SSID = "YOUR_SSID"
@@ -74,9 +74,9 @@ STATIC_IP = ("127.0.0.1", "255.255.255.0", "127.0.0.1", "127.0.0.1")  # ip,mask,
 WIZ_SPI_ID = 0
 WIZ_SCK = 18
 WIZ_MOSI = 19
-WIZ_MISO = 20                  # NOTE: avoid conflict with PPS on GPIO16
+WIZ_MISO = 16                  # NOTE: avoid conflict with PPS on GPIO16
 WIZ_CS = 17
-WIZ_RST = 15                   # wire W5x00 reset here (or change)
+WIZ_RST = 20                   # wire W5x00 reset here (or change)
 
 # NTP
 NTP_PORT = 123
@@ -178,7 +178,7 @@ FW_MAX_UPLOAD_BYTES = 300000   # safety cap; set 0 to disable cap
 
 
 # Watchdog
-ENABLE_WDT = True
+ENABLE_WDT = False
 WDT_TIMEOUT_MS = 8000
 
 DEBUG = True
@@ -201,7 +201,6 @@ try:
 except ImportError:
     import binascii as ubinascii  # type: ignore
 
-import machine
 from machine import Pin, I2C, UART
 try:
     from machine import WDT
@@ -1085,26 +1084,36 @@ class PeerMonitor:
             # Timestamp ASAP after packet received
             # --- START of time critical ---
             now1 = ticks_us()
-            index = wl_irq_index
-            for i in range(8):
-                if wl_irq_data[(index - i) & 0b111][1]:
-                    tstamp = wl_irq_data[(index - i) & 0b111][0]
-                    if not HAS_RECVFROM_TS:
-                        # can't perform matching, just use latest WL-IRQ timestamp
-                        tstamp_irq = tstamp
-                        break
-                    if ticks_diff(now1, tstamp) > 50_000:
-                        # IRQ is too old, expire it
-                        wl_irq_data[(index - i) & 0b111][1] = False
-                        continue
-                    if ticks_diff(tstamp_pkt & 0x3FFFFFFF, tstamp) < 0:
-                        # packet is from earlier IRQ, skip
-                        #log("Peer Skipped")
-                        continue
-                    if ticks_diff(tstamp_pkt & 0x3FFFFFFF, tstamp) < 600:
-                        # packet is within 600us of WL-IRQ timestamp
-                        tstamp_irq = tstamp
-                        wl_irq_data[(index - i) & 0b111][1] = False
+            tstamp_irq = None
+            if wl_irq_index is not None:
+                index = wl_irq_index
+                for i in range(8):
+                    if wl_irq_data[(index - i) & 0b111][1]:
+                        tstamp = wl_irq_data[(index - i) & 0b111][0]
+                        if not HAS_RECVFROM_TS:
+                            # can't perform matching, just use latest WL-IRQ timestamp
+                            tstamp_irq = tstamp
+                            break
+                        '''
+                        if ticks_diff(now1, tstamp) > 50_000:
+                            # IRQ is too old, expire it
+                            wl_irq_data[(index - i) & 0b111][1] = False
+                            continue
+                        '''
+                        if ticks_diff(tstamp_pkt & 0x3FFFFFFF, tstamp) < 0:
+                            # packet is from earlier IRQ, skip
+                            #log("Peer Skipped")
+                            continue
+                        if ticks_diff(tstamp_pkt & 0x3FFFFFFF, tstamp) < 600:
+                            # packet is within 600us of WL-IRQ timestamp
+                            tstamp_irq = tstamp
+                            wl_irq_data[(index - i) & 0b111][1] = False
+                            break
+            elif HAS_RECVFROM_TS:
+                tstamp_irq = tstamp_pkt
+            else:
+                tstamp_irq = now1
+
             if tstamp_irq is not None:
                 now = CLOCK.now_unix_us(tstamp_irq)
             else:
@@ -1371,6 +1380,15 @@ class NTPServer:
         count = MAX_PKT_COUNT
         pkt_build_us = 2500         # Typical delay in us
 
+        # clear out any expired sWL-IRQs
+        if wl_irq_index is not None:
+            now = ticks_us()
+            for i in range(8):
+                if wl_irq_data[i][1]:
+                    if ticks_diff(now, wl_irq_data[i][0]) > 50_000:
+                        # IRQ is too old, expire it
+                        wl_irq_data[i][1] = False
+
         # ensure that we don't trigger GC _DURING_ packet response
         if gc.mem_free() < (count * 2048):
             #log("whoops, GC happened", CLOCK.now_unix_us())
@@ -1408,32 +1426,41 @@ class NTPServer:
             # Timestamp ASAP after packet received
             # --- START of time critical ---
             now = ticks_us()
-            '''
-            log("Timestamp:", tstamp_pkt)
-            for i in range(8):
-                log("Wifi:", wl_irq_index, 0-i, wl_irq_data[(wl_irq_index - i) & 0b111])
-            '''
-            index = wl_irq_index
             tstamp_irq = None
-            for i in range(8):
-                if wl_irq_data[(index - i) & 0b111][1]:
-                    tstamp = wl_irq_data[(index - i) & 0b111][0]
-                    if not HAS_RECVFROM_TS:
-                        # can't perform matching, just use latest WL-IRQ timestamp
-                        tstamp_irq = tstamp
-                        break
-                    if ticks_diff(now, tstamp) > 50_000:
-                        # IRQ is too old, expire it
-                        wl_irq_data[(index - i) & 0b111][1] = False
-                        continue
-                    if ticks_diff(tstamp_pkt & 0x3FFFFFFF, tstamp) < 0:
-                        # packet is from earlier IRQ, skip
-                        #log("NTP timestamp lookup skipped")
-                        continue
-                    if ticks_diff(tstamp_pkt & 0x3FFFFFFF, tstamp) < 600:
-                        # packet is within 600us of WL-IRQ timestamp
-                        tstamp_irq = tstamp
-                        wl_irq_data[(index - i) & 0b111][1] = False
+            if wl_irq_index is not None:
+                '''
+                log("Timestamp:", tstamp_pkt)
+                for i in range(8):
+                    log("Wifi:", wl_irq_index, 0-i, wl_irq_data[(wl_irq_index - i) & 0b111])
+                '''
+                index = wl_irq_index
+                for i in range(8):
+                    if wl_irq_data[(index - i) & 0b111][1]:
+                        tstamp = wl_irq_data[(index - i) & 0b111][0]
+                        if not HAS_RECVFROM_TS:
+                            # can't perform matching, just use latest WL-IRQ timestamp
+                            tstamp_irq = tstamp
+                            break
+                        '''
+                        if ticks_diff(now, tstamp) > 50_000:
+                            # IRQ is too old, expire it
+                            wl_irq_data[(index - i) & 0b111][1] = False
+                            continue
+                        '''
+                        if ticks_diff(tstamp_pkt & 0x3FFFFFFF, tstamp) < 0:
+                            # packet is from earlier IRQ, skip
+                            #log("NTP timestamp lookup skipped")
+                            continue
+                        if ticks_diff(tstamp_pkt & 0x3FFFFFFF, tstamp) < 600:
+                            # packet is within 600us of WL-IRQ timestamp
+                            tstamp_irq = tstamp
+                            wl_irq_data[(index - i) & 0b111][1] = False
+                            break
+            elif HAS_RECVFROM_TS:
+                tstamp_irq = tstamp_pkt
+            else:
+                tstamp_irq = now
+
             if tstamp_irq is not None:
                 now1 = CLOCK.now_unix_us(tstamp_irq)
             else:
@@ -2395,7 +2422,10 @@ def network_init_with_portal(boot_ms):
         )
         cs = Pin(WIZ_CS, Pin.OUT)
         rst = Pin(WIZ_RST, Pin.OUT)
-        nic = network.WIZNET5K(spi, cs, rst)
+        try:
+            nic = network.WIZNET5K(spi, cs, rst)
+        except:
+            nic = network.WIZNET6K(spi, cs, rst)
         nic.active(True)
         if USE_STATIC_IP:
             nic.ifconfig(STATIC_IP)
@@ -2420,7 +2450,7 @@ _pps_sm = None
 # store the last 8 'sWL-IRQ' timestamps
 wl_irq_data = [[0, False],[0, False],[0, False],[0, False],
                [0, False],[0, False],[0, False],[0, False]]
-wl_irq_index = 0
+wl_irq_index = None
 
 # as global to prevent GC clearing them...
 dma_timestamp = None
@@ -2491,6 +2521,10 @@ def both_pins_high():
 
 def _wl_irq(pin):
     global wl_irq_data, wl_irq_index
+
+    if wl_irq_index is None:
+        wl_irq_index = 0
+
     while _pps_sm[3].rx_fifo():
         wl_irq_index += 1
         wl_irq_data[wl_irq_index & 0b111][0] = _pps_sm[3].get() & 0x3FFFFFFF
