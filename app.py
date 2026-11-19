@@ -77,6 +77,7 @@ WIZ_MOSI = 19
 WIZ_MISO = 16                  # NOTE: avoid conflict with PPS on GPIO16
 WIZ_CS = 17
 WIZ_RST = 20                   # wire W5x00 reset here (or change)
+WIZ_IRQ = 21
 
 # NTP
 NTP_PORT = 123
@@ -2422,10 +2423,11 @@ def network_init_with_portal(boot_ms):
         )
         cs = Pin(WIZ_CS, Pin.OUT)
         rst = Pin(WIZ_RST, Pin.OUT)
+        irq = Pin(WIZ_IRQ, Pin.IN)
         try:
-            nic = network.WIZNET5K(spi, cs, rst)
+            nic = network.WIZNET5K(spi, cs, rst, irq)
         except:
-            nic = network.WIZNET6K(spi, cs, rst)
+            nic = network.WIZNET6K(spi, cs, rst, irq)
         nic.active(True)
         if USE_STATIC_IP:
             nic.ifconfig(STATIC_IP)
@@ -2476,6 +2478,7 @@ def dma_relay():
     pull(block)                 # Pull 32-bit from TX-FIFO to ISR
     mov(isr, osr)               # copy ISR to OSR
     push(block)                 # Push 32-bit from OSR to RX-FIFO
+    irq(rel(0))
 
     wrap()
 
@@ -2519,6 +2522,19 @@ def both_pins_high():
     jmp(x_dec, "check_pins")        # jump if x!=0
     wrap()
 
+@rp2.asm_pio(out_init=rp2.PIO.OUT_LOW)
+def dma_detect_gpio_falling():
+    label("wait_for_low")
+    jmp(pin, "wait_for_low")
+
+    label("pin_is_low")
+    push(noblock)
+
+    label("wait_for_high")
+    jmp(pin, "wait_for_low")
+    jmp("wait_for_high")
+
+
 def _wl_irq(pin):
     global wl_irq_data, wl_irq_index
 
@@ -2552,6 +2568,13 @@ def setup_pps_pio_dma():
                                in_base=Pin(24),
                                sideset_base=Pin(26)))
         _pps_sm.append(rp2.StateMachine(3, dma_relay, freq=freq()))
+    else:
+        #p = Pin(21, Pin.IN)
+        #p.irq(trigger=Pin.IRQ_FALLING, handler=_wl_irq)
+        _pps_sm.append(rp2.StateMachine(2, dma_detect_gpio_falling, freq=freq(),
+                               jmp_pin=Pin(21)))
+        _pps_sm.append(rp2.StateMachine(3, dma_relay, freq=freq()))
+        _pps_sm[3].irq(handler=_wl_irq, hard=False)
 
     for m in _pps_sm:
         m.active(1)
@@ -2596,7 +2619,7 @@ def setup_pps_pio_dma():
         ctrl=dma_trigger_ctrl,
         trigger=True)
 
-    if NET_MODE == "wifi":
+    if True: #NET_MODE == "wifi":
         dma_wl_timestamp = rp2.DMA()
         dma_wl_trigger = rp2.DMA()
 
@@ -2636,7 +2659,10 @@ def setup_pps_pio_dma():
             ctrl=dma_wl_trigger_ctrl,
             trigger=True)
 
+    if NET_MODE == "wifi":
         log("synthetic-WL-IRQ monitor enabled on GPIO26")
+    else:
+        log("WIZNET-IRQ monitor enabled on GPIO21")
 
     log("PPS PIO/DMA enabled on GPIO", PPS_GPIO)
     return
